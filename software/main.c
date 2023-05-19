@@ -6,7 +6,7 @@
 #include "Public\GPIO.H"
 #include "Public\DEBUG.H"
 
-void led_all_off();    
+void led_all_set();    
 void led_off(UINT8 value);
 void led_set(UINT8 value, UINT8 blink);
 UINT16 adc_read();
@@ -86,7 +86,7 @@ int pd_verify(UINT8 value)
     UINT16 adc_value;
     adc_value = adc_read();
 
-    printf("ADC_VALUE: %d (%ld mV)\n",(UINT16)adc_value, (((UINT32)(adc_value) * 20130)) / 256);
+    //printf("ADC_VALUE: %d (%ld mV)\n",(UINT16)adc_value, (((UINT32)(adc_value) * 20130)) / 256);
 
     switch (value) {
         case (PD_5V):
@@ -136,13 +136,13 @@ UINT16 count = 0;
 UINT8 blink = 0;
 UINT8 blink_value = PD_5V;
 
-void led_all_off()
+void led_all_set(BOOL value)
 {
-    LED_5V  = 0;
-    LED_9V  = 0;
-    LED_12V = 0;
-    LED_15V = 0;
-    LED_20V = 0;
+    LED_5V  = value;
+    LED_9V  = value;
+    LED_12V = value;
+    LED_15V = value;
+    LED_20V = value;
 }
 
 void led_off(UINT8 value)
@@ -272,18 +272,65 @@ UINT16 key_read()
     return k;    
 }
 
+UINT8 WriteDataFlash(UINT8 addr, UINT8* buf, UINT8 len) {
+	UINT8 i;
+	SAFE_MOD = 0x55;
+	SAFE_MOD = 0xAA;
+
+	GLOBAL_CFG |= bDATA_WE;
+
+	SAFE_MOD = 0;
+
+	ROM_ADDR_H = DATA_FLASH_ADDR >> 8;
+	addr <<= 1;
+
+	for (i = 0; i < len; i++) {
+		ROM_ADDR_L = addr + i * 2;
+		ROM_DATA_L = *(buf + i);
+		if (ROM_STATUS & bROM_ADDR_OK) {
+			ROM_CTRL = ROM_CMD_WRITE;
+		}
+		if ((ROM_STATUS ^ bROM_ADDR_OK) > 0) {
+			return i;
+		}
+	}
+
+	SAFE_MOD = 0x55;
+	SAFE_MOD = 0xAA;
+	GLOBAL_CFG &= ~bDATA_WE;
+	SAFE_MOD = 0;
+
+	return i;
+}
+
+UINT8 ReadDataFlash(UINT8 addr, UINT8* buf, UINT8 len) {
+	UINT8 i;
+
+	ROM_ADDR_H = DATA_FLASH_ADDR >> 8;
+	addr <<= 1;
+	for (i = 0; i < len; i++) {
+		ROM_ADDR_L = addr + i * 2;
+		ROM_CTRL = ROM_CMD_READ;
+		*(buf + i) = ROM_DATA_L;
+	}
+	return i;
+}
+
 /* uart-0 baudrate: 57600 */
 main()
 {
     UINT16 i, curr_key, prev_key;
     UINT16 curr_pd = PD_5V;
     UINT32 loop = 0;
+	UINT16 changeTimeout = 0;
+	UINT8  blinkSpeed = 20;
+	BOOL   enableChange = FALSE;
 
 	CfgFsys();	
-	mInitSTDIO();
-    printf("\r\nPDTricker system buildtime [" __TIME__ " " __DATE__ "] " "rev     1.0\r\n");
 
 #if 0
+	mInitSTDIO();
+    printf("\r\nPDTricker system buildtime [" __TIME__ " " __DATE__ "] " "rev     1.0\r\n");
     printf("T0 Test ...\n"); 
     mTimer0Clk12DivFsys();	                                                   // 12MHz / 12 = 1MHz
     mTimer_x_ModInit(0,2);                                                     // timer-0, mode-2
@@ -295,41 +342,66 @@ main()
 
 	Port1Cfg(0, 0);
     ADCInit( 0 );
+		
+	if (!key_read()) {
+		enableChange = TRUE;
+		led_all_set(TRUE);
+		while(!key_read());
+	}
 
     prev_key = curr_key = 1;
-    led_all_off();
+    led_all_set(FALSE);
+	ReadDataFlash(0, &curr_pd, 2);
+	if (curr_pd >= PD_MAX) {
+		curr_pd = PD_5V;
+		WriteDataFlash(0, &curr_pd, 2);
+	}
     pd_set(curr_pd);
 
     i = 0;
     
 	while ( 1 ) {
-
         prev_key = curr_key;
         curr_key = key_read();
 
-        if (prev_key == 1 && curr_key == 0) {
-            led_off(curr_pd);
-            curr_pd++;
-            if (curr_pd == PD_MAX) {
-                curr_pd = PD_5V;
-            }
+		if(enableChange) {
+			if (prev_key == 1 && curr_key == 0) {
+				changeTimeout = 0;
+				led_off(curr_pd);
+				curr_pd++;
+				if (curr_pd == PD_MAX) {
+					curr_pd = PD_5V;
+				}
 
-            printf("pd_set %d\n", curr_pd);
-            pd_set(curr_pd);
-
-        }
-
+				//printf("pd_set %d\n", curr_pd);
+				pd_set(curr_pd);
+			}
+		}
+				
         pd_verify(curr_pd);
 
-        /* every 200ms */
-        if (loop % 20 == 0) {
+		if(enableChange)
+			blinkSpeed = 10; // 100ms
+		else
+			blinkSpeed = 20; // 200ms
+					
+        if (loop % blinkSpeed == 0) {
             if (blink) {
                 blink_handler();
             }
         }
+		
+		if(enableChange) {
+			if(++changeTimeout>=300) {  // 3 secs
+				enableChange = FALSE;
+				WriteDataFlash(0, &curr_pd, 2);
+				led_all_set(TRUE);
+				mDelaymS(500);
+				led_all_set(FALSE);
+			}
+		}
 
         mDelaymS(10);
         loop++;
-        
 	}
 }
